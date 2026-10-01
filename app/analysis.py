@@ -79,7 +79,11 @@ def build_analysis(
                     f"{kind}：与 {prev.cue_id} 的间隔为 {actual_gap}ms，"
                     f"小于最小间隔 {min_gap_ms}ms"
                 )
-        cross = len(windows[i]) == 0 and bool(shots)
+        # 原位置是否整段属于某一镜头：跨越切点即标记跨镜头，与平移容差
+        # 无关；恰好始于/止于切点（端点闭合包含）视为合法。
+        cross = bool(shots) and not any(
+            s <= pc.start_ms and pc.end_ms <= e for s, e in shots
+        )
         prop = res.proposals.get(i)
         reports.append(CueReport(
             uid=0,  # 由调用方（DB id）填充

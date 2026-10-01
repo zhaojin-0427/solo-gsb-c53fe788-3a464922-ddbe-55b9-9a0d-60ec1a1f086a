@@ -2,7 +2,8 @@
 
 约束（仅平移、保持原时长）：
   1. 相邻 cue 间隔：t[i-1] + dur[i-1] + min_gap <= t[i]（消除重叠与过小空隙）
-  2. 每条 cue 必须整体落在某个镜头窗口内（边界容差 tolerance_ms）
+  2. 每条 cue 必须整体落在某一个镜头内（边界容差 tolerance_ms；
+     相接/重叠的镜头各自独立参与判断，不做合并）
   3. 无镜头窗口可容纳等属于“内在冲突”，仅平移不可解
 
 择优（字典序，确定性）：
@@ -79,34 +80,33 @@ class _Func:
     edges: list[_Edge]       # len = len(nodes)-1
 
 
-def _merge_shots(shots: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    if not shots:
-        return []
-    shots = sorted(shots)
-    out: list[list[int]] = [list(shots[0])]
-    for s, e in shots[1:]:
-        if s <= out[-1][1]:
-            out[-1][1] = max(out[-1][1], e)
-        else:
-            out.append([s, e])
-    return [(a, b) for a, b in out]
-
-
 def shot_windows(
     cue: CueInput, shots: list[tuple[int, int]], tol: int, bound: int
 ) -> list[Window]:
-    """cue 可选取的起点窗口（整数闭区间）。无镜头数据时全域可行。"""
+    """cue 可选取的起点窗口（整数闭区间）。无镜头数据时全域可行。
+
+    每个镜头独立参与判断：相接（前镜终点等于后镜起点）或重叠的镜头
+    一律不合并，cue 必须整体落在某一个镜头之内；仅把同一 cue 在不同
+    镜头下得到的相交/相接起点窗口并成连续可行域（不改变可行集合，
+    保证窗口 x 坐标单调，供 DP 的 RESTART 语义使用）。
+    """
     if not shots:
         return [Window(0, max(0, bound - cue.duration))]
     windows: list[Window] = []
-    for s, e in _merge_shots(shots):
+    for s, e in sorted(shots):
         if e - s < cue.duration:
             continue
         lo = max(s, cue.start_ms - tol)
         hi = min(e - cue.duration, cue.start_ms + tol)
         if lo <= hi:
             windows.append(Window(lo, hi))
-    return windows
+    merged: list[Window] = []
+    for w in windows:
+        if merged and w.lo <= merged[-1].hi:
+            merged[-1] = Window(merged[-1].lo, max(merged[-1].hi, w.hi))
+        else:
+            merged.append(w)
+    return merged
 
 
 # ---------- 分段线性函数运算 ----------
