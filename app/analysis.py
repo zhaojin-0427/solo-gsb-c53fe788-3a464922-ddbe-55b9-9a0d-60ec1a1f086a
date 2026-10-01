@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .corrector import CueInput, shot_windows, solve_run
+from .corrector import (
+    CueInput,
+    fits_in_shot,
+    shot_windows,
+    solve_run,
+)
 from .shots import Shot
 from .subtitles import visible_text
 
@@ -79,7 +84,11 @@ def build_analysis(
                     f"{kind}：与 {prev.cue_id} 的间隔为 {actual_gap}ms，"
                     f"小于最小间隔 {min_gap_ms}ms"
                 )
-        cross = len(windows[i]) == 0 and bool(shots)
+        # 跨镜头只看原位置：每个镜头独立判断，不受平移容差影响；
+        # 恰在切点结束/开始（半开区间端点相等）不算跨镜头。
+        cross = bool(shots) and not fits_in_shot(
+            pc.start_ms, pc.end_ms, shots
+        )
         prop = res.proposals.get(i)
         reports.append(CueReport(
             uid=0,  # 由调用方（DB id）填充

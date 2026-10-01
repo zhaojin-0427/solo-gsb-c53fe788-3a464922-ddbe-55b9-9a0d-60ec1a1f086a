@@ -2,7 +2,8 @@
 
 约束（仅平移、保持原时长）：
   1. 相邻 cue 间隔：t[i-1] + dur[i-1] + min_gap <= t[i]（消除重叠与过小空隙）
-  2. 每条 cue 必须整体落在某个镜头窗口内（边界容差 tolerance_ms）
+  2. 每条 cue 必须整体落在某一个**独立镜头**窗口内（每个镜头单独成窗，
+     相接镜头在切点处不相通；边界容差 tolerance_ms 只约束平移幅度）
   3. 无镜头窗口可容纳等属于“内在冲突”，仅平移不可解
 
 择优（字典序，确定性）：
@@ -79,34 +80,88 @@ class _Func:
     edges: list[_Edge]       # len = len(nodes)-1
 
 
-def _merge_shots(shots: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    if not shots:
+def fits_in_shot(
+    start_ms: int, end_ms: int, shots: list[tuple[int, int]]
+) -> bool:
+    """半开区间 [start_ms, end_ms) 是否整体落在**某一个独立镜头**内。
+
+    每个镜头独立判断，不做任何合并：恰在切点结束（end == 切点）或恰在切点
+    开始（start == 切点）都算落在镜头内；只有真正跨入相邻镜头才算跨镜头。
+    """
+    return any(s <= start_ms and end_ms <= e for s, e in shots)
+
+
+def validate_shift(
+    start_ms: int,
+    end_ms: int,
+    orig_start_ms: int,
+    orig_end_ms: int,
+    shots: list[tuple[int, int]],
+    tol: int,
+) -> str | None:
+    """采纳校验（与分析/重算同一套规则）。
+
+    仅允许整体平移：保持原时长、起点不超出原起点 ± 容差、平移后整段属于
+    同一个镜头。返回 None 表示合法，否则返回拒绝原因。
+    """
+    duration = end_ms - start_ms
+    orig_duration = orig_end_ms - orig_start_ms
+    if duration != orig_duration:
+        return (
+            f"采纳时间 {start_ms}–{end_ms}ms 时长为 {duration}ms，"
+            f"与原时长 {orig_duration}ms 不一致；校正只允许平移，不允许改变时长"
+        )
+    if abs(start_ms - orig_start_ms) > tol:
+        return (
+            f"采纳起点 {start_ms}ms 超出原起点 {orig_start_ms}ms "
+            f"± {tol}ms 的平移容差"
+        )
+    if shots and not fits_in_shot(start_ms, end_ms, shots):
+        return (
+            f"采纳后的 {start_ms}–{end_ms}ms 跨越镜头切点，"
+            "没有整体落在任一独立镜头内"
+        )
+    return None
+
+
+def _merge_windows(windows: list[Window]) -> list[Window]:
+    """合并起点域中真正重叠或相邻（无整数空隙）的窗口。
+
+    注意：这里合并的是「可选取点区间」的并集，绝不合并镜头本身——
+    两个在切点处相接的镜头（…1200)、[1200…）各自产生的窗口若在起点域中
+    并不重叠，就必须保留为两个窗口（窗口之间为 RESTART 空隙）。
+    """
+    if not windows:
         return []
-    shots = sorted(shots)
-    out: list[list[int]] = [list(shots[0])]
-    for s, e in shots[1:]:
-        if s <= out[-1][1]:
-            out[-1][1] = max(out[-1][1], e)
+    windows = sorted(windows, key=lambda w: (w.lo, w.hi))
+    out: list[Window] = [Window(windows[0].lo, windows[0].hi)]
+    for w in windows[1:]:
+        if w.lo <= out[-1].hi + 1:
+            out[-1].hi = max(out[-1].hi, w.hi)
         else:
-            out.append([s, e])
-    return [(a, b) for a, b in out]
+            out.append(Window(w.lo, w.hi))
+    return out
 
 
 def shot_windows(
     cue: CueInput, shots: list[tuple[int, int]], tol: int, bound: int
 ) -> list[Window]:
-    """cue 可选取的起点窗口（整数闭区间）。无镜头数据时全域可行。"""
+    """cue 可选取的起点窗口（整数闭区间）。无镜头数据时全域可行。
+
+    每个镜头独立贡献一个起点窗口（要求整段属于该镜头），再取窗口并集；
+    相邻镜头在切点处相接并不会产生跨越切点的可行起点。
+    """
     if not shots:
         return [Window(0, max(0, bound - cue.duration))]
     windows: list[Window] = []
-    for s, e in _merge_shots(shots):
+    for s, e in shots:
         if e - s < cue.duration:
             continue
         lo = max(s, cue.start_ms - tol)
         hi = min(e - cue.duration, cue.start_ms + tol)
         if lo <= hi:
             windows.append(Window(lo, hi))
-    return windows
+    return _merge_windows(windows)
 
 
 # ---------- 分段线性函数运算 ----------

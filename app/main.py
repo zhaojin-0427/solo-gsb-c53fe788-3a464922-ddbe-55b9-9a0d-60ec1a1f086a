@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from . import database as db
 from .analysis import build_analysis
+from .corrector import validate_shift
 from .shots import parse_shots
 from .subtitles import parse_subtitle, visible_text
 
@@ -191,15 +192,26 @@ def update_settings(pid: int, body: SettingsIn):
 @app.post("/api/projects/{pid}/adopt")
 def adopt(pid: int, body: AdoptIn):
     with db.get_conn() as conn:
-        if db.get_project(conn, pid) is None:
+        project = db.get_project(conn, pid)
+        if project is None:
             raise HTTPException(404, "项目不存在")
         cue_rows = list(db.get_cues(conn, pid))
         target = next((r for r in cue_rows if r["id"] == body.cue_uid), None)
         if target is None:
             raise HTTPException(400, "cue 不存在")
-        orig_dur = target["end_ms"] - target["start_ms"]
-        if body.new_end_ms - body.new_start_ms != orig_dur:
-            raise HTTPException(400, "校正仅允许平移：时长必须与原时长完全一致")
+        if body.new_end_ms < body.new_start_ms:
+            raise HTTPException(400, "结束时间不得早于开始时间")
+        shot_rows = list(db.get_shots(conn, pid))
+        shots = [(r["start_ms"], r["end_ms"]) for r in shot_rows]
+        # 与项目详情/参数重算同一套规则：只平移、保持时长、起点在容差内、
+        # 平移后整段属于同一个独立镜头。
+        reason = validate_shift(
+            body.new_start_ms, body.new_end_ms,
+            target["start_ms"], target["end_ms"],
+            shots, int(project["tolerance_ms"]),
+        )
+        if reason is not None:
+            raise HTTPException(400, reason)
         # 必须落在当前参数下的提案位置（重新计算并比对）
         payload = _recompute(conn, pid)
         cand = next((c for c in payload["analysis"]["cues"]
